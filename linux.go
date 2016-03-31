@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -291,9 +292,73 @@ func getUptime() (float64, error) {
 	return float64(sysinfo.Uptime), err
 }
 
+func matchPIDPattern(pat string) (pid string, err error) {
+	r, err := regexp.Compile(pat)
+	if err != nil {
+		return pid, fmt.Errorf("Failed to compile %s. %s", pat, err)
+	}
+
+	res, err := getPsResult()
+	if err != nil {
+		return pid, fmt.Errorf("Failed to getPsResult. %s", err)
+	}
+
+	for _, ps := range res {
+		if !r.MatchString(ps.cmd) {
+			continue
+		}
+		if ps.pid == strconv.Itoa(os.Getppid()) {
+			continue
+		}
+		pid = ps.pid
+		break
+	}
+	return pid, nil
+}
+
+type psResult struct {
+	ppid string
+	pid  string
+	cmd  string
+}
+
+func getPsResult() (res []psResult, err error) {
+	psformat := "ppid,pid,command"
+	output, err := exec.Command("ps", "axwwo", psformat).Output()
+	if err != nil {
+		return res, err
+	}
+
+	for _, line := range strings.Split(string(output), "\n")[1:] {
+		if line == "" {
+			continue
+		}
+
+		r, err := parsePsResult(line)
+		if err != nil {
+			return res, err
+		}
+		res = append(res, r)
+	}
+	return res, nil
+}
+
+func parsePsResult(line string) (r psResult, err error) {
+	fields := strings.Fields(line)
+	fieldsMinLen := 3
+	if len(fields) < fieldsMinLen {
+		return r, fmt.Errorf(
+			"parsePsResult: insufficient words. line=%s, fields=%v",
+			line, fields,
+		)
+	}
+	return psResult{fields[0], fields[1], strings.Join(fields[2:], " ")}, nil
+}
+
 func main() {
 	optPID := flag.String("pid", "", "PID")
 	optPIDFile := flag.String("pidfile", "", "PID file")
+	optPIDPat := flag.String("pid-pattern", "", "Match a command against this pattern")
 	optTempfile := flag.String("tempfile", "", "Temp file name")
 	optFollowChildProcesses := flag.Bool("follow-child-processes", false, "Follow child processes")
 	optMetricKey := flag.String("metric-key-prefix", "", "Metric key prefix")
@@ -310,10 +375,15 @@ func main() {
 
 	if *optPID != "" {
 		pid = *optPID
-	} else {
+	} else if *optPIDFile != "" {
 		pid, err = readPIDFile(*optPIDFile)
 		if err != nil {
 			logger.Errorf("Failed to read /proc/%s/stat. %s", pid, err)
+		}
+	} else if *optPIDPat != "" {
+		pid, err = matchPIDPattern(*optPIDPat)
+		if err != nil {
+			logger.Errorf("Failed to match %s. %s", *optPIDPat, err)
 		}
 	}
 	if pid == "" {
